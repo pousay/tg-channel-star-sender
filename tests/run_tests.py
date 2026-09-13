@@ -116,6 +116,33 @@ def test_notify_never_raises() -> None:
     assert bot.sent == []
 
 
+def test_notify_delivered_count_logged() -> None:
+    """A debug log must report how many admins received the message."""
+    import logging
+
+    from bot.utils import notify
+
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logging.getLogger().addHandler(Capture())
+    logging.getLogger().setLevel(logging.DEBUG)
+    try:
+        bot = StubBot(fail_for={222})
+        asyncio.run(notify.notify_admin(bot, "hello"))
+        assert any(
+            r.levelno == logging.DEBUG and "1/2" in r.getMessage()
+            for r in records
+        ), "expected a '1/2 admins' debug log"
+    finally:
+        logging.getLogger().handlers = [
+            h for h in logging.getLogger().handlers if not isinstance(h, Capture)
+        ]
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
@@ -123,6 +150,7 @@ def main() -> None:
     run_test(test_notify_fan_out_to_all_admins)
     run_test(test_notify_partial_failure_does_not_block_others)
     run_test(test_notify_never_raises)
+    run_test(test_notify_delivered_count_logged)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
