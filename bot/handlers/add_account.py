@@ -51,9 +51,8 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 async def _fetch_star_balance(user_client: Client) -> int:
     """Fetch the Telegram Stars balance for the authenticated user client."""
     try:
-        balance = await user_client.get_stars_balance()
-        # get_stars_balance returns a StarsStatus object; extract the amount
-        return balance.amount if hasattr(balance, "amount") else int(balance)
+        # get_stars_balance() returns a float (amount + nanos / 1e9)
+        return int(await user_client.get_stars_balance())
     except Exception:
         return 0
 
