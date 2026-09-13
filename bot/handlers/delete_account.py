@@ -114,7 +114,6 @@ async def _handle_delete_phone(
             "⚠️ فرمت شماره تلفن اشتباه است!\n"
             "لطفاً به این شکل بفرستید: <code>+989123456789</code>",
             reply_markup=_cancel_keyboard(),
-            parse_mode="html",
         )
         return
 
@@ -125,7 +124,6 @@ async def _handle_delete_phone(
         await message.reply_text(
             f"⚠️ اکانتی با شماره <code>{phone}</code> پیدا نشد.",
             reply_markup=main_menu_button(),
-            parse_mode="html",
         )
         return
 
@@ -138,5 +136,4 @@ async def _handle_delete_phone(
         f"📱 شماره: <code>{phone}</code>\n"
         f"⭐ ستاره: {stars}",
         reply_markup=_confirm_keyboard(phone),
-        parse_mode="html",
     )

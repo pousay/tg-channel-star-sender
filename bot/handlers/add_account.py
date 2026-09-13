@@ -124,7 +124,6 @@ async def _handle_phone(
             "⚠️ فرمت شماره تلفن اشتباه است!\n"
             "لطفاً به این شکل بفرستید: <code>+989123456789</code>",
             reply_markup=_cancel_keyboard(),
-            parse_mode="html",
         )
         return
 
@@ -152,7 +151,6 @@ async def _handle_phone(
             "لطفاً کدی که در تلگرام دریافت کرده‌اید را بفرستید:\n"
             "<i>بدون فاصله، مثل <code>12345</code></i>",
             reply_markup=_cancel_keyboard(),
-            parse_mode="html",
         )
     except FloodWait as e:
         await user_client.disconnect()
@@ -161,7 +159,6 @@ async def _handle_phone(
             f"⏳ محدودیت موقت تلگرام!\n"
             f"لطفاً <b>{e.value}</b> ثانیه دیگر دوباره تلاش کنید.",
             reply_markup=_cancel_keyboard(),
-            parse_mode="html",
         )
     except Exception as e:
         await user_client.disconnect()
@@ -169,7 +166,6 @@ async def _handle_phone(
         await message.reply_text(
             f"❌ ارسال کد ورود ناموفق بود:\n<code>{esc(e)}</code>",
             reply_markup=_cancel_keyboard(),
-            parse_mode="html",
         )
 
 
@@ -195,13 +191,11 @@ async def _handle_code(
             "🔐 این اکانت تایید دو مرحله‌ای (2FA) دارد.\n"
             "لطفاً رمز دو مرحله‌ای را بفرستید:",
             reply_markup=_cancel_keyboard(),
-            parse_mode="html",
         )
     except PhoneCodeExpired:
         await message.reply_text(
             "❌ این کد <b>منقضی</b> شده است.\nلطفاً از منوی اصلی دوباره شروع کنید.",
             reply_markup=main_menu_button(),
-            parse_mode="html",
         )
         await user_client.disconnect()
         _state.pop(uid, None)
@@ -209,7 +203,6 @@ async def _handle_code(
         await message.reply_text(
             "❌ کد وارد شده <b>نامعتبر</b> است.\nلطفاً از منوی اصلی دوباره شروع کنید.",
             reply_markup=main_menu_button(),
-            parse_mode="html",
         )
         await user_client.disconnect()
         _state.pop(uid, None)
@@ -217,7 +210,6 @@ async def _handle_code(
         await message.reply_text(
             f"❌ ورود ناموفق بود:\n<code>{esc(e)}</code>",
             reply_markup=main_menu_button(),
-            parse_mode="html",
         )
         await user_client.disconnect()
         _state.pop(uid, None)
@@ -237,13 +229,11 @@ async def _handle_tfa(
         await message.reply_text(
             "❌ رمز دو مرحله‌ای اشتباه است.\nلطفاً دوباره تلاش کنید:",
             reply_markup=_cancel_keyboard(),
-            parse_mode="html",
         )
     except Exception as e:
         await message.reply_text(
             f"❌ تایید رمز دو مرحله‌ای ناموفق بود:\n<code>{esc(e)}</code>",
             reply_markup=main_menu_button(),
-            parse_mode="html",
         )
         await user_client.disconnect()
         _state.pop(uid, None)
@@ -292,5 +282,4 @@ async def _finalize_login(
         f"📱 شماره: <code>{phone}</code>\n"
         f"⭐ موجودی ستاره: <b>{star_balance}</b>",
         reply_markup=main_menu_button(),
-        parse_mode="html",
     )

@@ -51,7 +51,6 @@ async def safe_edit(message, text: str, reply_markup: InlineKeyboardMarkup | Non
         return await message.edit_text(
             text,
             reply_markup=reply_markup,
-            parse_mode="html",
         )
     except MessageNotModified:
         return message

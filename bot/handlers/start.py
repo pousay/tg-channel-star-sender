@@ -19,5 +19,4 @@ def register_start(app: Client) -> None:
         await message.reply_text(
             MAIN_MENU_TEXT,
             reply_markup=main_menu_keyboard(),
-            parse_mode="html",
         )
