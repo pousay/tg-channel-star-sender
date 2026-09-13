@@ -44,9 +44,40 @@ def test_config_admin_ids_parsing() -> None:
     assert cfg.ADMIN_IDS == [111, 222], cfg.ADMIN_IDS
 
 
+def test_config_empty_admin_ids_warning() -> None:
+    """An empty ADMIN_IDS must trigger a loud startup warning."""
+    import importlib
+    import logging
+
+    import bot.config as cfg
+
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logging.getLogger().addHandler(Capture())
+    logging.getLogger().setLevel(logging.WARNING)
+    try:
+        os.environ["ADMIN_IDS"] = "  , ,"
+        importlib.reload(cfg)
+        assert any(
+            r.levelno == logging.WARNING and "ADMIN_IDS" in r.getMessage()
+            for r in records
+        ), "expected an ADMIN_IDS warning"
+    finally:
+        os.environ["ADMIN_IDS"] = "111,222"
+        importlib.reload(cfg)
+        logging.getLogger().handlers = [
+            h for h in logging.getLogger().handlers if not isinstance(h, Capture)
+        ]
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
+    run_test(test_config_empty_admin_ids_warning)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
