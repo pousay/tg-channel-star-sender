@@ -8,7 +8,7 @@ Flow:
   4. On "Yes" → the account is removed from the JSON file and confirmed.
 """
 
-from pyrogram import Client, filters
+from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.utils.auth import admin_only
@@ -61,7 +61,10 @@ def register_delete_account(app: Client) -> None:
         uid = message.from_user.id
         state = _state.get(uid)
         if not state:
-            return  # Not in the delete flow
+            # Not in the delete flow — let other text routers in this group
+            # handle the update (dispatcher stops at the first handler that
+            # returns normally).
+            raise ContinuePropagation
 
         if state.get("step") == "awaiting_delete_phone":
             await _handle_delete_phone(client, message, state, uid)

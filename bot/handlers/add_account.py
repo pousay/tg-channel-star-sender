@@ -11,7 +11,7 @@ Flow:
 
 import os
 
-from pyrogram import Client, filters
+from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import (
     SessionPasswordNeeded,
@@ -74,7 +74,10 @@ def register_add_account(app: Client) -> None:
         uid = message.from_user.id
         state = _state.get(uid)
         if not state:
-            return  # Not in any flow
+            # Not in the add-account flow — let other text routers in this
+            # group handle the update (dispatcher stops at the first handler
+            # that returns normally).
+            raise ContinuePropagation
 
         step = state.get("step")
 
