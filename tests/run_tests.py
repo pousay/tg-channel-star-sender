@@ -74,10 +74,55 @@ def test_config_empty_admin_ids_warning() -> None:
         ]
 
 
+# ── Notify fan-out ────────────────────────────────────────────────────────────
+
+class StubBot:
+    """Minimal client stub that records send_message calls."""
+
+    def __init__(self, fail_for: set[int] | None = None) -> None:
+        self.sent: list[int] = []
+        self.fail_for = fail_for or set()
+
+    async def send_message(self, chat_id: int, text: str, parse_mode: str = None) -> None:
+        if chat_id in self.fail_for:
+            raise RuntimeError("delivery failed")
+        self.sent.append(chat_id)
+
+
+def test_notify_fan_out_to_all_admins() -> None:
+    """Every admin in ADMIN_IDS must receive the log message."""
+    from bot.utils import notify
+
+    bot = StubBot()
+    asyncio.run(notify.notify_admin(bot, "hello"))
+    assert bot.sent == [111, 222], bot.sent
+
+
+def test_notify_partial_failure_does_not_block_others() -> None:
+    """One admin failing to receive must not stop delivery to the rest."""
+    from bot.utils import notify
+
+    bot = StubBot(fail_for={111})
+    asyncio.run(notify.notify_admin(bot, "hello"))
+    assert bot.sent == [222], bot.sent
+
+
+def test_notify_never_raises() -> None:
+    """Total delivery failure must not raise back to the caller."""
+    from bot.utils import notify
+
+    bot = StubBot(fail_for={111, 222})
+    asyncio.run(notify.notify_admin(bot, "hello"))  # must not raise
+    assert bot.sent == []
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
     run_test(test_config_empty_admin_ids_warning)
+    run_test(test_notify_fan_out_to_all_admins)
+    run_test(test_notify_partial_failure_does_not_block_others)
+    run_test(test_notify_never_raises)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
