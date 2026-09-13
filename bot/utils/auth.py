@@ -1,5 +1,8 @@
 """
 auth.py — Admin-only access guard decorator.
+
+ADMIN_IDS is the single source of truth for admin identity: it governs
+both bot-panel access (here) and event-log delivery (see bot/utils/notify.py).
 """
 
 from functools import wraps
