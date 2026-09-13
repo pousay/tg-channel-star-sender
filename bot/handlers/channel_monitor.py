@@ -31,7 +31,6 @@ from pyrogram.errors import (
 )
 
 from bot.config import (
-    ADMIN_ID,
     DELAY_MINUTES,
     MAX_ACCOUNTS,
     MAX_STARS,
