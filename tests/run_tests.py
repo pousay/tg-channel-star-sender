@@ -174,6 +174,33 @@ def test_monitor_log_formats_are_valid_html() -> None:
 
 
 
+def test_monitor_eligibility_and_not_enough_fallback() -> None:
+    """Eligibility = balance >= MAX_STARS; not enough -> empty result + count."""
+    from bot.utils import db
+    from bot.handlers import channel_monitor as cm
+
+    db.save_accounts([
+        {
+            "phone": f"+100000000{i:02d}",
+            "name": f"U{i}",
+            "star_balance": 0 if i % 3 == 0 else cm.MAX_STARS + i,
+            "session_string": f"s{i}",
+            "tfa_password": None,
+        }
+        for i in range(21)
+    ])
+
+    selected, available = cm._select_accounts(4)
+    assert len(selected) == 4
+    assert all(a["star_balance"] >= cm.MAX_STARS for a in selected)
+    assert len({a["phone"] for a in selected}) == 4  # no duplicates
+
+    selected2, available2 = cm._select_accounts(99)
+    assert selected2 == []
+    eligible_count = len([a for a in db.load_accounts() if a["star_balance"] >= cm.MAX_STARS])
+    assert available2 == eligible_count
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
@@ -183,6 +210,7 @@ def main() -> None:
     run_test(test_notify_never_raises)
     run_test(test_notify_delivered_count_logged)
     run_test(test_monitor_log_formats_are_valid_html)
+    run_test(test_monitor_eligibility_and_not_enough_fallback)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
