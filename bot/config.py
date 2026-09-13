@@ -14,7 +14,9 @@ BOT_TOKEN: str = os.environ["BOT_TOKEN"]
 API_ID: int = int(os.environ["API_ID"])
 API_HASH: str = os.environ["API_HASH"]
 
-# Admin user IDs (comma-separated in .env)
+# Admin user IDs (comma-separated in .env).
+# Single source of truth: these admins manage the bot panel AND receive
+# every event log (success, failure, summaries, alerts).
 ADMIN_IDS: list[int] = [
     int(uid.strip()) for uid in os.environ["ADMIN_IDS"].split(",") if uid.strip()
 ]
@@ -57,8 +59,3 @@ MAX_STARS: int = int(os.getenv("MAX_STARS", "5"))
 REACTIONS: list[str] = [
     r.strip() for r in os.getenv("REACTIONS", "❤️,👍,🔥,🎉").split(",") if r.strip()
 ]
-
-# Admin who receives all event logs (defaults to the first ADMIN_ID)
-ADMIN_ID: int = int(
-    os.getenv("ADMIN_ID", str(ADMIN_IDS[0] if ADMIN_IDS else 0))
-)
