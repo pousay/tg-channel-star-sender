@@ -2,6 +2,7 @@
 config.py — Load and expose all environment variables.
 """
 
+import logging
 import os
 from dotenv import load_dotenv
 
@@ -20,6 +21,12 @@ API_HASH: str = os.environ["API_HASH"]
 ADMIN_IDS: list[int] = [
     int(uid.strip()) for uid in os.environ["ADMIN_IDS"].split(",") if uid.strip()
 ]
+
+if not ADMIN_IDS:
+    logging.warning(
+        "ADMIN_IDS is empty — nobody can use the bot panel and no event "
+        "logs will be delivered. Fill ADMIN_IDS in .env!"
+    )
 
 # Path to the JSON accounts database
 DB_PATH: str = os.getenv("DB_PATH", "data/accounts.json")
