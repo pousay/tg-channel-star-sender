@@ -20,11 +20,16 @@ from bot.config import ADMIN_IDS
 
 async def notify_admin(client: Client, text: str) -> None:
     """Send a log message to every admin; never raise on failure."""
+    delivered = 0
     for admin_id in ADMIN_IDS:
         try:
             await client.send_message(admin_id, text, parse_mode="html")
+            delivered += 1
         except Exception as e:
             # Keep a local trace so the event is never fully lost
             logging.warning(
                 "Failed to deliver admin notification to %s: %s", admin_id, e
             )
+    logging.debug(
+        "Admin notification delivered to %d/%d admins", delivered, len(ADMIN_IDS)
+    )
