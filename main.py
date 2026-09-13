@@ -7,6 +7,7 @@ Creates the bot client, registers all feature handlers, and starts polling.
 import logging
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 from bot.config import BOT_TOKEN, API_ID, API_HASH
 from bot.handlers.start import register_start
@@ -33,6 +34,9 @@ def main() -> None:
         bot_token=BOT_TOKEN,
         in_memory=True,
     )
+
+    # All user-facing texts use HTML tags (<b>, <code>, <i>) — enforce globally
+    app.set_parse_mode(ParseMode.HTML)
 
     # Register all feature handlers
     register_start(app)
