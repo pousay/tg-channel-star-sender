@@ -12,8 +12,9 @@ End-to-end flow for every new post in TARGET_CHANNEL:
   7. Assign a random Star amount (MIN_STARS..MAX_STARS) to each account.
   8. Per account: connect via saved session, send the reaction, then the
      Stars (paid reaction). Errors are handled per account.
-  9. Log every action to the admin (success/failure, exact reason,
+  9. Log every action to the admins (success/failure, exact reason,
      post link, timestamp) and finish with a per-post summary.
+     All logs fan out to every ID in ADMIN_IDS via bot/utils/notify.py.
 """
 
 import asyncio
