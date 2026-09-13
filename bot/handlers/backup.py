@@ -23,5 +23,5 @@ def register_backup(app: Client) -> None:
 
         await message.reply_document(
             DB_PATH,
-            caption="📦 Accounts database backup",
+            caption="📦 فایل بکاپ اکانت‌ها",
         )
