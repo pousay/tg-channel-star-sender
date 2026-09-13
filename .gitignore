@@ -1,0 +1,8 @@
+.env
+data/accounts.json
+sessions/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
