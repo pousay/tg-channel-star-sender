@@ -212,6 +212,130 @@ def test_monitor_reaction_and_star_assignment_bounds() -> None:
     assert MIN_STARS <= stars <= MAX_STARS
 
 
+# ── Text-router propagation (delete flow regression) ──────────────────────────
+
+class FakeApp:
+    """Captures handler registrations instead of talking to Telegram."""
+
+    def __init__(self) -> None:
+        self.handlers: list[tuple[str, object, object]] = []
+
+    def on_message(self, filters=None, group=0):
+        def deco(fn):
+            self.handlers.append(("message", filters, fn))
+            return fn
+        return deco
+
+    def on_callback_query(self, filters=None, group=0):
+        def deco(fn):
+            self.handlers.append(("callback", filters, fn))
+            return fn
+        return deco
+
+
+from pyrogram.types import Message as PyroMessage
+
+
+class FakeMessage(PyroMessage):
+    """Enough of a Message for the admin_only guard and the text routers.
+
+    Subclasses the real pyrogram Message (without calling its __init__,
+    which needs many raw fields) so the admin_only decorator's
+    isinstance() check passes.
+    """
+
+    def __init__(self, text: str, user_id: int) -> None:
+        self.text = text
+        self.from_user = type("U", (), {"id": user_id})()
+        self.replies: list[tuple[str, dict]] = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append((text, kwargs))
+
+
+def _get_text_routers():
+    """Register all handlers and return the text routers in registration order."""
+    from bot.handlers import add_account, delete_account
+
+    app = FakeApp()
+    add_account.register_add_account(app)
+    delete_account.register_delete_account(app)
+
+    routers = []
+    for kind, _, fn in app.handlers:
+        if kind == "message" and getattr(fn, "__name__", "") == "text_router":
+            routers.append(fn)
+    assert len(routers) == 2, f"expected 2 text routers, got {len(routers)}"
+    return routers  # [add_account's, delete_account's] — registration order
+
+
+def test_idle_text_routers_continue_propagation() -> None:
+    """Routers with no in-flow state must NOT consume the update silently.
+
+    This encodes the delete-flow bug: an idle first router used to return
+    normally, which made the dispatcher skip delete_account's router.
+    """
+    from bot.handlers import add_account, delete_account
+    from pyrogram import ContinuePropagation
+
+    add_account._state.clear()
+    delete_account._state.clear()
+    add_router, delete_router = _get_text_routers()
+
+    msg = FakeMessage("+989123456789", user_id=111)
+    for router in (add_router, delete_router):
+        try:
+            asyncio.run(router(None, msg))
+        except ContinuePropagation:
+            continue
+        raise AssertionError(f"{router.__module__} consumed an idle update")
+
+
+def test_delete_flow_receives_phone_through_router_chain() -> None:
+    """Full chain: idle add router propagates, delete router handles the phone."""
+    from bot.handlers import add_account, delete_account
+    from bot.utils import db
+    from pyrogram import ContinuePropagation
+
+    add_account._state.clear()
+    delete_account._state.clear()
+    db.save_accounts([])  # phone will be "not found" — enough to prove routing
+    add_router, delete_router = _get_text_routers()
+
+    delete_account._state[111] = {"step": "awaiting_delete_phone"}
+    msg = FakeMessage("+989123456789", user_id=111)
+
+    # Mini-dispatcher: same group semantics as pyrogram (break on normal return)
+    for router in (add_router, delete_router):
+        try:
+            asyncio.run(router(None, msg))
+        except ContinuePropagation:
+            continue
+        break
+
+    assert 111 not in delete_account._state, "delete state must be consumed"
+    assert msg.replies, "delete router must reply to the admin"
+    assert "پیدا نشد" in msg.replies[0][0]
+
+
+def test_active_add_router_consumes_update() -> None:
+    """An active add-flow router must keep consuming (no propagation)."""
+    from bot.handlers import add_account, delete_account
+    from pyrogram import ContinuePropagation
+
+    add_account._state.clear()
+    delete_account._state.clear()
+    add_router, _ = _get_text_routers()
+
+    # Harmless unknown step: no branch runs, no Telegram calls happen
+    add_account._state[111] = {"step": "__noop__"}
+    msg = FakeMessage("whatever", user_id=111)
+    try:
+        asyncio.run(add_router(None, msg))
+    except ContinuePropagation:
+        raise AssertionError("active router must consume, not propagate")
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
@@ -223,6 +347,9 @@ def main() -> None:
     run_test(test_monitor_log_formats_are_valid_html)
     run_test(test_monitor_eligibility_and_not_enough_fallback)
     run_test(test_monitor_reaction_and_star_assignment_bounds)
+    run_test(test_idle_text_routers_continue_propagation)
+    run_test(test_delete_flow_receives_phone_through_router_chain)
+    run_test(test_active_add_router_consumes_update)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
