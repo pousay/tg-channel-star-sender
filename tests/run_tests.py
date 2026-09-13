@@ -201,6 +201,17 @@ def test_monitor_eligibility_and_not_enough_fallback() -> None:
     assert available2 == eligible_count
 
 
+def test_monitor_reaction_and_star_assignment_bounds() -> None:
+    """Reactions come from REACTIONS; star amounts stay within MIN..MAX."""
+    from bot.handlers import channel_monitor as cm
+    from bot.config import MIN_STARS, MAX_STARS, REACTIONS
+
+    reaction = cm.random.choice(REACTIONS)
+    stars = cm.random.randint(MIN_STARS, MAX_STARS)
+    assert reaction in REACTIONS
+    assert MIN_STARS <= stars <= MAX_STARS
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
@@ -211,6 +222,7 @@ def main() -> None:
     run_test(test_notify_delivered_count_logged)
     run_test(test_monitor_log_formats_are_valid_html)
     run_test(test_monitor_eligibility_and_not_enough_fallback)
+    run_test(test_monitor_reaction_and_star_assignment_bounds)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
