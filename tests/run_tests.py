@@ -143,6 +143,37 @@ def test_notify_delivered_count_logged() -> None:
         ]
 
 
+# ── Channel monitor ───────────────────────────────────────────────────────────
+
+def test_monitor_log_formats_are_valid_html() -> None:
+    """Every admin-facing log format must parse as valid HTML."""
+    import asyncio
+
+    from pyrogram import Client
+    from pyrogram.parser import Parser
+
+    from bot.handlers import channel_monitor as cm
+
+    app = Client("t", api_id=1, api_hash="x", bot_token="1:test", in_memory=True)
+    parser = Parser(app)
+    samples = [
+        f"✅ اکانت <code>+98912</code> (A&lt;li&gt;) — ری‌اکشن ❤️ ارسال شد — "
+        f"پست: https://t.me/c/1/2 — 🕒 {cm._now()}",
+        f"❌ اکانت <code>+98912</code> (Ali) — ارسال <b>4</b> ستاره ناموفق — "
+        f"دلیل: محدودیت موقت تلگرام (30 ثانیه)\nپست: https://t.me/c/1/2",
+        "⚠️ پردازش پست https://t.me/c/1/2 ممکن نشد — به <b>4</b> اکانت واجد نیاز بود، "
+        "اما فقط <b>1</b> اکانت موجودی ≥ <b>5</b> ستاره داشت.\n"
+        "هیچ ستاره یا ری‌اکشنی ارسال نشد.",
+        "📊 <b>خلاصه پست</b>\n🔗 پست: https://t.me/c/1/2\n"
+        "👥 اکانت‌های انتخاب‌شده: <b>3</b>\n✅ عملیات موفق: <b>5</b>\n"
+        "❌ عملیات ناموفق: <b>1</b>\n⭐ مجموع ستاره ارسال‌شده: <b>16</b>",
+    ]
+    for sample in samples:
+        asyncio.run(parser.parse(sample, None))
+
+
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
@@ -151,6 +182,7 @@ def main() -> None:
     run_test(test_notify_partial_failure_does_not_block_others)
     run_test(test_notify_never_raises)
     run_test(test_notify_delivered_count_logged)
+    run_test(test_monitor_log_formats_are_valid_html)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
