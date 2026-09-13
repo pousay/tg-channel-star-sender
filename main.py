@@ -16,6 +16,7 @@ from bot.handlers.list_accounts import register_list_accounts
 from bot.handlers.delete_account import register_delete_account
 from bot.handlers.update_stars import register_update_stars
 from bot.handlers.backup import register_backup
+from bot.handlers.channel_monitor import register_channel_monitor
 
 
 def main() -> None:
@@ -45,6 +46,7 @@ def main() -> None:
     register_delete_account(app)
     register_update_stars(app)
     register_backup(app)
+    register_channel_monitor(app)
 
     logging.info("Star Sender bot started")
     app.run()
