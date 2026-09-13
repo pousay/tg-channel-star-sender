@@ -22,12 +22,7 @@ from pyrogram.errors import (
 from bot.config import API_ID, API_HASH
 from bot.utils.auth import admin_only
 from bot.utils.db import load_accounts, upsert_account
-
-
-def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
-    ])
+from bot.utils.ui import esc, safe_edit, main_menu_button
 
 
 def register_update_stars(app: Client) -> None:
@@ -36,29 +31,31 @@ def register_update_stars(app: Client) -> None:
     @app.on_callback_query(filters.regex("^update_stars$"))
     @admin_only
     async def cb_update_stars(client: Client, query: CallbackQuery) -> None:
+        await query.answer()
         accounts = load_accounts()
 
         if not accounts:
-            await query.answer("📭 No accounts saved yet.", show_alert=True)
+            await query.answer("📭 هنوز هیچ اکانتی ذخیره نشده است.", show_alert=True)
             return
 
+        total = len(accounts)
+
         # Initial progress message
-        status = await query.message.edit_text(
-            f"⏳ Updating star balances… (0/{len(accounts)})"
+        status = await safe_edit(
+            query.message,
+            f"⏳ در حال به‌روزرسانی موجودی ستاره‌ها… (0/{total})",
         )
 
         updated: list[tuple[str, int]] = []   # (phone, new_balance)
         failed: list[tuple[str, str]] = []    # (phone, reason)
 
         for i, account in enumerate(accounts, start=1):
-            phone = account.get("phone", "unknown")
+            phone = account.get("phone", "نامشخص")
             session_string = account.get("session_string")
 
             if not session_string:
-                failed.append((phone, "No session string saved for this account."))
-                await status.edit_text(
-                    f"⏳ Updating star balances… ({i}/{len(accounts)})"
-                )
+                failed.append((phone, "سشنی برای این اکانت ذخیره نشده است."))
+                await safe_edit(status, f"⏳ در حال به‌روزرسانی موجودی ستاره‌ها… ({i}/{total})")
                 continue
 
             user_client = Client(
@@ -74,14 +71,14 @@ def register_update_stars(app: Client) -> None:
                 upsert_account(account)
                 updated.append((phone, balance))
             except FloodWait as e:
-                failed.append((phone, f"Flood wait — retry in {e.value} seconds."))
+                failed.append((phone, f"محدودیت موقت تلگرام — {e.value} ثانیه دیگر تلاش کنید."))
                 await asyncio.sleep(e.value)
             except AuthKeyUnregistered:
-                failed.append((phone, "Session revoked / logged out."))
+                failed.append((phone, "سشن باطل شده یا از اکانت خارج شده است."))
             except UserDeactivated:
-                failed.append((phone, "Account is deactivated."))
+                failed.append((phone, "اکانت غیرفعال (حذف) شده است."))
             except Unauthorized:
-                failed.append((phone, "Unauthorized — session is no longer valid."))
+                failed.append((phone, "سشن دیگر معتبر نیست."))
             except Exception as e:
                 failed.append((phone, f"{type(e).__name__}: {e}"))
             finally:
@@ -91,26 +88,23 @@ def register_update_stars(app: Client) -> None:
                     pass
 
                 # Live progress update
-                await status.edit_text(
-                    f"⏳ Updating star balances… ({i}/{len(accounts)})"
-                )
+                await safe_edit(status, f"⏳ در حال به‌روزرسانی موجودی ستاره‌ها… ({i}/{total})")
 
         # ── Build the final report ────────────────────────────────────────────
         lines = [
-            f"⭐ **Star balance update finished** — {len(updated)} ok, {len(failed)} failed.\n"
+            f"⭐ <b>به‌روزرسانی موجودی ستاره‌ها تمام شد!</b>\n\n"
+            f"✅ موفق: <b>{len(updated)}</b>\n"
+            f"❌ ناموفق: <b>{len(failed)}</b>"
         ]
 
         if updated:
-            lines.append("**Updated:**")
+            lines.append("\n<b>✅ به‌روز شده:</b>")
             for phone, balance in updated:
-                lines.append(f"✅ <code>{phone}</code> — {balance} stars")
+                lines.append(f"✔️ <code>{esc(phone)}</code> — {balance} ستاره")
 
         if failed:
-            lines.append("\n**Failed:**")
+            lines.append("\n<b>❌ ناموفق:</b>")
             for phone, reason in failed:
-                lines.append(f"❌ <code>{phone}</code> — {reason}")
+                lines.append(f"✖️ <code>{esc(phone)}</code>\n└─ {esc(reason)}")
 
-        await status.edit_text(
-            "\n".join(lines),
-            reply_markup=_main_menu_keyboard(),
-        )
+        await safe_edit(status, "\n".join(lines), main_menu_button())

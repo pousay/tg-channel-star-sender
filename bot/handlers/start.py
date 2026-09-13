@@ -3,18 +3,10 @@ start.py — Handles the /start command and shows the main menu.
 """
 
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 
 from bot.utils.auth import admin_only
-
-
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Build and return the main menu inline keyboard."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Account", callback_data="add_account")],
-        [InlineKeyboardButton("📋 List Accounts", callback_data="list_accounts:0")],
-        [InlineKeyboardButton("⭐ Update Stars Balance", callback_data="update_stars")],
-    ])
+from bot.utils.ui import MAIN_MENU_TEXT, main_menu_keyboard
 
 
 def register_start(app: Client) -> None:
@@ -25,6 +17,7 @@ def register_start(app: Client) -> None:
     async def start_handler(client: Client, message: Message) -> None:
         """Send the main menu when /start is received."""
         await message.reply_text(
-            "👋 **Star Sender — Account Manager**\n\nChoose an action:",
+            MAIN_MENU_TEXT,
             reply_markup=main_menu_keyboard(),
+            parse_mode="html",
         )

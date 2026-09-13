@@ -9,15 +9,11 @@ Flow:
 """
 
 from pyrogram import Client, filters
-from pyrogram.types import (
-    CallbackQuery,
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from pyrogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from bot.utils.auth import admin_only
 from bot.utils.db import get_account, delete_account
+from bot.utils.ui import esc, safe_edit, main_menu_button
 
 
 # In-memory state per admin user for the delete flow
@@ -26,22 +22,16 @@ _state: dict[int, dict] = {}
 
 def _cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel")]
+        [InlineKeyboardButton("❌ انصراف", callback_data="delete_cancel")]
     ])
 
 
 def _confirm_keyboard(phone: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Yes, delete", callback_data=f"delete_yes:{phone}"),
-            InlineKeyboardButton("❌ Cancel", callback_data="delete_cancel"),
+            InlineKeyboardButton("✅ بله، حذف شود", callback_data=f"delete_yes:{phone}"),
+            InlineKeyboardButton("❌ انصراف", callback_data="delete_cancel"),
         ]
-    ])
-
-
-def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
     ])
 
 
@@ -53,12 +43,14 @@ def register_delete_account(app: Client) -> None:
     @app.on_callback_query(filters.regex("^delete_account_start$"))
     @admin_only
     async def cb_delete_start(client: Client, query: CallbackQuery) -> None:
+        await query.answer()
         uid = query.from_user.id
         _state[uid] = {"step": "awaiting_delete_phone"}
-        await query.message.edit_text(
-            "🗑 Please send the **phone number** of the account to delete.\n"
-            "Format: `+1234567890`",
-            reply_markup=_cancel_keyboard(),
+        await safe_edit(
+            query.message,
+            "🗑 لطفاً شماره تلفن اکانت مورد نظر برای حذف را بفرستید:\n"
+            "<code>+989123456789</code>",
+            _cancel_keyboard(),
         )
 
     # ── Incoming text — routed by current step ────────────────────────────────
@@ -79,18 +71,21 @@ def register_delete_account(app: Client) -> None:
     @app.on_callback_query(filters.regex(r"^delete_yes:(.+)$"))
     @admin_only
     async def cb_delete_yes(client: Client, query: CallbackQuery) -> None:
+        await query.answer()
         phone = query.data.split(":", 1)[1]
         _state.pop(query.from_user.id, None)
 
         if delete_account(phone):
-            await query.message.edit_text(
-                f"✅ Account <code>{phone}</code> has been **deleted**.",
-                reply_markup=_main_menu_keyboard(),
+            await safe_edit(
+                query.message,
+                f"✅ اکانت <code>{phone}</code> با موفقیت حذف شد.",
+                main_menu_button(),
             )
         else:
-            await query.message.edit_text(
-                f"⚠️ Account <code>{phone}</code> was not found.",
-                reply_markup=_main_menu_keyboard(),
+            await safe_edit(
+                query.message,
+                f"⚠️ اکانت <code>{phone}</code> پیدا نشد.",
+                main_menu_button(),
             )
 
     # ── Cancel → back to main menu ────────────────────────────────────────────
@@ -98,10 +93,12 @@ def register_delete_account(app: Client) -> None:
     @app.on_callback_query(filters.regex("^delete_cancel$"))
     @admin_only
     async def cb_delete_cancel(client: Client, query: CallbackQuery) -> None:
+        await query.answer()
         _state.pop(query.from_user.id, None)
-        await query.message.edit_text(
-            "❌ Delete cancelled.",
-            reply_markup=_main_menu_keyboard(),
+        await safe_edit(
+            query.message,
+            "❌ عملیات حذف لغو شد.",
+            main_menu_button(),
         )
 
 
@@ -114,8 +111,10 @@ async def _handle_delete_phone(
     # 1) Format validation: must start with "+" followed by at least 7 digits
     if not (phone.startswith("+") and phone[1:].isdigit() and len(phone) > 7):
         await message.reply_text(
-            "⚠️ Invalid phone number format. Please use `+1234567890`.",
+            "⚠️ فرمت شماره تلفن اشتباه است!\n"
+            "لطفاً به این شکل بفرستید: <code>+989123456789</code>",
             reply_markup=_cancel_keyboard(),
+            parse_mode="html",
         )
         return
 
@@ -124,18 +123,20 @@ async def _handle_delete_phone(
     if not account:
         _state.pop(uid, None)
         await message.reply_text(
-            f"⚠️ No account found with phone <code>{phone}</code>.",
-            reply_markup=_main_menu_keyboard(),
+            f"⚠️ اکانتی با شماره <code>{phone}</code> پیدا نشد.",
+            reply_markup=main_menu_button(),
+            parse_mode="html",
         )
         return
 
     # 3) Found → ask for approval
-    name = account.get("name", "Unknown")
+    name = account.get("name", "نامشخص")
     stars = account.get("star_balance", 0)
     await message.reply_text(
-        f"⚠️ **Are you sure you want to delete this account?**\n\n"
-        f"👤 Name: **{name}**\n"
-        f"📱 Phone: <code>{phone}</code>\n"
-        f"⭐ Stars: {stars}",
+        f"⚠️ <b>آیا از حذف این اکانت مطمئن هستید؟</b>\n\n"
+        f"👤 نام: <b>{esc(name)}</b>\n"
+        f"📱 شماره: <code>{phone}</code>\n"
+        f"⭐ ستاره: {stars}",
         reply_markup=_confirm_keyboard(phone),
+        parse_mode="html",
     )

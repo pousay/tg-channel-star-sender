@@ -10,13 +10,9 @@ Flow:
 """
 
 import os
+
 from pyrogram import Client, filters
-from pyrogram.types import (
-    CallbackQuery,
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from pyrogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import (
     SessionPasswordNeeded,
     PhoneCodeInvalid,
@@ -28,6 +24,7 @@ from pyrogram.errors import (
 from bot.config import API_ID, API_HASH, SESSIONS_DIR
 from bot.utils.auth import admin_only
 from bot.utils.db import upsert_account
+from bot.utils.ui import esc, safe_edit, MAIN_MENU_TEXT, main_menu_keyboard, main_menu_button
 
 
 # In-memory state per admin user: tracks where in the flow they are.
@@ -38,13 +35,7 @@ _state: dict[int, dict] = {}
 
 def _cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_flow")]
-    ])
-
-
-def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu")]
+        [InlineKeyboardButton("❌ انصراف", callback_data="cancel_flow")]
     ])
 
 
@@ -65,12 +56,14 @@ def register_add_account(app: Client) -> None:
     @app.on_callback_query(filters.regex("^add_account$"))
     @admin_only
     async def cb_add_account(client: Client, query: CallbackQuery) -> None:
+        await query.answer()
         uid = query.from_user.id
         _state[uid] = {"step": "awaiting_phone"}
-        await query.message.edit_text(
-            "📱 Please send the **phone number** of the account to add.\n"
-            "Format: `+1234567890`",
-            reply_markup=_cancel_keyboard(),
+        await safe_edit(
+            query.message,
+            "📱 لطفاً شماره تلفن اکانت مورد نظر را بفرستید:\n"
+            "<code>+989123456789</code>",
+            _cancel_keyboard(),
         )
 
     # ── Incoming text messages — routed by current step ───────────────────────
@@ -97,6 +90,7 @@ def register_add_account(app: Client) -> None:
     @app.on_callback_query(filters.regex("^cancel_flow$"))
     @admin_only
     async def cb_cancel(client: Client, query: CallbackQuery) -> None:
+        await query.answer()
         uid = query.from_user.id
         state = _state.pop(uid, None)
         # Disconnect the temporary user client if it exists
@@ -105,21 +99,15 @@ def register_add_account(app: Client) -> None:
                 await state["user_client"].disconnect()
             except Exception:
                 pass
-        await query.message.edit_text(
-            "❌ Flow cancelled.",
-            reply_markup=_main_menu_keyboard(),
-        )
+        await safe_edit(query.message, "❌ عملیات لغو شد.", main_menu_button())
 
     # ── Main menu callback ────────────────────────────────────────────────────
 
     @app.on_callback_query(filters.regex("^main_menu$"))
     @admin_only
     async def cb_main_menu(client: Client, query: CallbackQuery) -> None:
-        from bot.handlers.start import main_menu_keyboard
-        await query.message.edit_text(
-            "👋 **Star Sender — Account Manager**\n\nChoose an action:",
-            reply_markup=main_menu_keyboard(),
-        )
+        await query.answer()
+        await safe_edit(query.message, MAIN_MENU_TEXT, main_menu_keyboard())
 
 
 # ── Internal step handlers ────────────────────────────────────────────────────
@@ -133,8 +121,10 @@ async def _handle_phone(
     # Basic validation: must start with + and contain only digits after
     if not (phone.startswith("+") and phone[1:].isdigit() and len(phone) > 7):
         await message.reply_text(
-            "⚠️ Invalid phone number format. Please use `+1234567890`.",
+            "⚠️ فرمت شماره تلفن اشتباه است!\n"
+            "لطفاً به این شکل بفرستید: <code>+989123456789</code>",
             reply_markup=_cancel_keyboard(),
+            parse_mode="html",
         )
         return
 
@@ -158,24 +148,28 @@ async def _handle_phone(
         state["step"] = "awaiting_code"
 
         await message.reply_text(
-            f"✅ Login code sent to **{phone}**.\n\n"
-            "Please send the **login code** you received on Telegram.\n"
-            "_(Enter it without spaces, e.g. `12345`)_",
+            f"✅ کد ورود به شماره <code>{phone}</code> ارسال شد.\n\n"
+            "لطفاً کدی که در تلگرام دریافت کرده‌اید را بفرستید:\n"
+            "<i>بدون فاصله، مثل <code>12345</code></i>",
             reply_markup=_cancel_keyboard(),
+            parse_mode="html",
         )
     except FloodWait as e:
         await user_client.disconnect()
         _state.pop(uid, None)
         await message.reply_text(
-            f"⏳ Flood wait: please try again in **{e.value} seconds**.",
+            f"⏳ محدودیت موقت تلگرام!\n"
+            f"لطفاً <b>{e.value}</b> ثانیه دیگر دوباره تلاش کنید.",
             reply_markup=_cancel_keyboard(),
+            parse_mode="html",
         )
     except Exception as e:
         await user_client.disconnect()
         _state.pop(uid, None)
         await message.reply_text(
-            f"❌ Failed to send login code: `{e}`",
+            f"❌ ارسال کد ورود ناموفق بود:\n<code>{esc(e)}</code>",
             reply_markup=_cancel_keyboard(),
+            parse_mode="html",
         )
 
 
@@ -189,7 +183,7 @@ async def _handle_code(
     user_client: Client = state["user_client"]
 
     try:
-        signed_in = await user_client.sign_in(phone, phone_code_hash, code)
+        await user_client.sign_in(phone, phone_code_hash, code)
 
         # Login successful — fetch details and save
         await _finalize_login(client, message, state, uid, user_client, tfa_password=None)
@@ -198,22 +192,32 @@ async def _handle_code(
         # 2FA is enabled on this account
         state["step"] = "awaiting_tfa"
         await message.reply_text(
-            "🔐 This account has **Two-Factor Authentication** enabled.\n"
-            "Please send the **TFA password**.",
+            "🔐 این اکانت تایید دو مرحله‌ای (2FA) دارد.\n"
+            "لطفاً رمز دو مرحله‌ای را بفرستید:",
             reply_markup=_cancel_keyboard(),
+            parse_mode="html",
         )
-    except (PhoneCodeInvalid, PhoneCodeExpired) as e:
-        error = "expired" if isinstance(e, PhoneCodeExpired) else "invalid"
+    except PhoneCodeExpired:
         await message.reply_text(
-            f"❌ The code is **{error}**. Please try again from /start.",
-            reply_markup=_main_menu_keyboard(),
+            "❌ این کد <b>منقضی</b> شده است.\nلطفاً از منوی اصلی دوباره شروع کنید.",
+            reply_markup=main_menu_button(),
+            parse_mode="html",
+        )
+        await user_client.disconnect()
+        _state.pop(uid, None)
+    except PhoneCodeInvalid:
+        await message.reply_text(
+            "❌ کد وارد شده <b>نامعتبر</b> است.\nلطفاً از منوی اصلی دوباره شروع کنید.",
+            reply_markup=main_menu_button(),
+            parse_mode="html",
         )
         await user_client.disconnect()
         _state.pop(uid, None)
     except Exception as e:
         await message.reply_text(
-            f"❌ Login failed: `{e}`",
-            reply_markup=_main_menu_keyboard(),
+            f"❌ ورود ناموفق بود:\n<code>{esc(e)}</code>",
+            reply_markup=main_menu_button(),
+            parse_mode="html",
         )
         await user_client.disconnect()
         _state.pop(uid, None)
@@ -231,13 +235,15 @@ async def _handle_tfa(
         await _finalize_login(client, message, state, uid, user_client, tfa_password)
     except PasswordHashInvalid:
         await message.reply_text(
-            "❌ Incorrect TFA password. Please try again.",
+            "❌ رمز دو مرحله‌ای اشتباه است.\nلطفاً دوباره تلاش کنید:",
             reply_markup=_cancel_keyboard(),
+            parse_mode="html",
         )
     except Exception as e:
         await message.reply_text(
-            f"❌ TFA verification failed: `{e}`",
-            reply_markup=_main_menu_keyboard(),
+            f"❌ تایید رمز دو مرحله‌ای ناموفق بود:\n<code>{esc(e)}</code>",
+            reply_markup=main_menu_button(),
+            parse_mode="html",
         )
         await user_client.disconnect()
         _state.pop(uid, None)
@@ -281,9 +287,10 @@ async def _finalize_login(
     _state.pop(uid, None)
 
     await message.reply_text(
-        f"✅ **Account added successfully!**\n\n"
-        f"👤 Name: **{name}**\n"
-        f"📱 Phone: `{phone}`\n"
-        f"⭐ Stars: **{star_balance}**",
-        reply_markup=_main_menu_keyboard(),
+        f"✅ <b>اکانت با موفقیت اضافه شد!</b>\n\n"
+        f"👤 نام: <b>{esc(name)}</b>\n"
+        f"📱 شماره: <code>{phone}</code>\n"
+        f"⭐ موجودی ستاره: <b>{star_balance}</b>",
+        reply_markup=main_menu_button(),
+        parse_mode="html",
     )
