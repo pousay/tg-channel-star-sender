@@ -66,3 +66,19 @@ MAX_STARS: int = int(os.getenv("MAX_STARS", "5"))
 REACTIONS: list[str] = [
     r.strip() for r in os.getenv("REACTIONS", "❤️,👍,🔥,🎉").split(",") if r.strip()
 ]
+
+# ── Channel polling (replaces live on_message detection) ─────────────────────
+
+# Minutes between poll cycles: each cycle fetches the latest posts of the
+# target channel and decides which ones must be processed.
+POLL_INTERVAL_MINUTES: int = int(os.getenv("POLL_INTERVAL_MINUTES", "5"))
+
+# How many latest posts each poll cycle fetches.
+POLL_FETCH_COUNT: int = int(os.getenv("POLL_FETCH_COUNT", "10"))
+
+# A keyword post first seen older than this is skipped as stale (protection
+# against acting on long-gone giveaways, e.g. right after a bot restart).
+POST_MAX_AGE_MINUTES: int = int(os.getenv("POST_MAX_AGE_MINUTES", "60"))
+
+# JSON store of already-checked posts (prevents re-processing on every cycle)
+POSTS_DB_PATH: str = os.getenv("POSTS_DB_PATH", "data/processed_posts.json")
