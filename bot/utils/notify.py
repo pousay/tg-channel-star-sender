@@ -23,7 +23,7 @@ async def notify_admin(client: Client, text: str) -> None:
     delivered = 0
     for admin_id in ADMIN_IDS:
         try:
-            await client.send_message(admin_id, text, parse_mode="html")
+            await client.send_message(admin_id, text)
             delivered += 1
         except Exception as e:
             # Keep a local trace so the event is never fully lost
