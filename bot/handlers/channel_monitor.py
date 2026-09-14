@@ -69,6 +69,7 @@ _PER_ACCOUNT_PAUSE_SECONDS = 1.5
 
 # ── Pure helpers (unit-testable, no Telegram I/O) ─────────────────────────────
 
+
 def _post_link(message: Message) -> str:
     """Build a clickable link for the post (works for private channels too)."""
     chat = message.chat
@@ -94,8 +95,9 @@ def _post_key(message: Message) -> str:
     return f"{chat_id}:{message.media_group_id or message.id}"
 
 
-def _decide_action(entry: dict | None, message: Message,
-                   now: datetime) -> tuple[str, dict | None]:
+def _decide_action(
+    entry: dict | None, message: Message, now: datetime
+) -> tuple[str, dict | None]:
     """
     Pure decision for one fetched post (no I/O — unit-testable).
 
@@ -145,8 +147,7 @@ def _select_accounts(count: int) -> tuple[list[dict], int]:
     """
     accounts = load_accounts()
     eligible = [
-        acc for acc in accounts
-        if int(acc.get("star_balance", 0) or 0) >= MAX_STARS
+        acc for acc in accounts if int(acc.get("star_balance", 0) or 0) >= MAX_STARS
     ]
     if len(eligible) < count:
         return [], len(eligible)
@@ -181,6 +182,7 @@ def _failure_reason(e: Exception) -> str:
 
 # ── Poller account management ─────────────────────────────────────────────────
 
+
 async def _acquire_poller(client: Client) -> Client | None:
     """
     Reuse the persistent poller, or connect a user account that can read
@@ -191,8 +193,11 @@ async def _acquire_poller(client: Client) -> Client | None:
 
     if _poller is not None:
         return _poller
-
+    n = 0
     for account in load_accounts():
+        if n == 1:
+            return
+
         session_string = account.get("session_string")
         if not session_string:
             continue
@@ -213,7 +218,9 @@ async def _acquire_poller(client: Client) -> Client | None:
                     f"<code>{esc(account.get('phone', '?'))}</code>",
                 )
                 _no_poller_notified = False
+            n = 1
             return _poller
+
         except Exception as e:
             logging.warning(
                 "Poller account %s unusable: %s", account.get("phone", "?"), e
@@ -228,14 +235,16 @@ async def _acquire_poller(client: Client) -> Client | None:
 
 # ── Per-post pipeline ─────────────────────────────────────────────────────────
 
+
 async def _process_post(client: Client, message: Message, link: str) -> None:
     """Run the reaction + star-gifting pipeline for one due post."""
     count = random.randint(MIN_ACCOUNTS, MAX_ACCOUNTS)
     selected, available = _select_accounts(count)
 
     if len(selected) < count:
-        await post_store.mark(_post_key(message), "skipped",
-                              reason="not_enough_eligible")
+        await post_store.mark(
+            _post_key(message), "skipped", reason="not_enough_eligible"
+        )
         await notify_admin(
             client,
             f"⚠️ پردازش پست {link} ممکن نشد — به <b>{count}</b> اکانت واجد نیاز بود، "
@@ -244,9 +253,9 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
         )
         return
 
-    ok_actions = 0    # successful reactions + star sends
+    ok_actions = 0  # successful reactions + star sends
     fail_actions = 0  # failed reactions + star sends
-    total_stars = 0   # stars actually delivered
+    total_stars = 0  # stars actually delivered
 
     for account in selected:
         phone = account.get("phone", "نامشخص")
@@ -326,8 +335,7 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
     )
 
 
-async def _handle_fetched_post(client: Client, message: Message,
-                               now: datetime) -> None:
+async def _handle_fetched_post(client: Client, message: Message, now: datetime) -> None:
     """Store/decision step for one fetched post (dedupe + filter + delay)."""
     key = _post_key(message)
 
@@ -337,15 +345,18 @@ async def _handle_fetched_post(client: Client, message: Message,
         return
 
     entry = await post_store.get_post(key)
-    if entry is not None and entry.get("status") in ("processing", "done", "failed", "skipped"):
+    if entry is not None and entry.get("status") in (
+        "processing",
+        "done",
+        "failed",
+        "skipped",
+    ):
         return  # already handled — the dedupe store's whole purpose
 
     action, record = _decide_action(entry, message, now)
 
     if action == "skip":
-        await post_store.ensure(
-            key, message.date, now, status=record["status"]
-        )
+        await post_store.ensure(key, message.date, now, status=record["status"])
         await post_store.mark(key, "skipped", reason=record.get("reason"))
         logging.info("Post %s skipped: %s", message.id, record.get("reason"))
         return
@@ -353,7 +364,8 @@ async def _handle_fetched_post(client: Client, message: Message,
     if action == "wait":
         if record is not None:
             await post_store.ensure(
-                key, message.date,
+                key,
+                message.date,
                 datetime.fromisoformat(record["act_at"]),
             )
         return  # not due yet — next cycle will pick it up
@@ -361,7 +373,8 @@ async def _handle_fetched_post(client: Client, message: Message,
     # action == "act"
     if entry is None:
         await post_store.ensure(
-            key, message.date,
+            key,
+            message.date,
             datetime.fromisoformat(record["act_at"]),
             status="processing",
         )
@@ -386,6 +399,7 @@ async def _handle_fetched_post(client: Client, message: Message,
 
 
 # ── Poll cycle + loop ─────────────────────────────────────────────────────────
+
 
 async def poll_once(client: Client) -> int:
     """Run one poll cycle. Returns the number of keyword posts found."""
@@ -433,7 +447,9 @@ async def poll_loop(client: Client) -> None:
     """Forever: poll → process → sleep POLL_INTERVAL_MINUTES."""
     logging.info(
         "Channel poller started — every %s min, last %s posts of %s",
-        POLL_INTERVAL_MINUTES, POLL_FETCH_COUNT, TARGET_CHANNEL,
+        POLL_INTERVAL_MINUTES,
+        POLL_FETCH_COUNT,
+        TARGET_CHANNEL,
     )
     while True:
         try:
