@@ -240,6 +240,7 @@ def register_channel_monitor(app: Client) -> None:
 
     @app.on_message(filters.chat(TARGET_CHANNEL))
     async def on_channel_post(client: Client, message: Message) -> None:
+        logging.info("new post detected in channel")
         if message.service:
             return
 
