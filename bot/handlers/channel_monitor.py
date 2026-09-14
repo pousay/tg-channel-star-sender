@@ -13,10 +13,12 @@ Pipeline per qualifying post:
   2. Dedupe — an album (media_group_id) fires one event per media item;
      only the first is scheduled.
   3. Wait DELAY_MINUTES (in the background, non-blocking).
-  4. Pick a random number of accounts (MIN_ACCOUNTS..MAX_ACCOUNTS) with
-     balance >= MAX_STARS.
-  5. Per account: connect via saved session, send a random reaction, then a
-     random Star amount (paid reaction). Errors are handled per account.
+  4. Pick a random subset of accounts (MIN_ACCOUNTS..MAX_ACCOUNTS) with
+     balance >= MAX_STARS — this subset is who will send Stars.
+  5. Per account (ALL saved accounts, not just the subset): connect via saved
+     session, send a random reaction. If the account is in the Star subset,
+     also send a random Star amount (paid reaction). Errors are handled
+     per account.
   6. Log everything to all admins via bot/utils/notify.py.
 
 Note: because scheduling lives in memory, posts still "in the delay window"
@@ -127,28 +129,34 @@ def _failure_reason(e: Exception) -> str:
 
 
 async def _process_post(client: Client, message: Message, link: str) -> None:
-    """Run the reaction + star-gifting pipeline for one due post."""
-    count = random.randint(MIN_ACCOUNTS, MAX_ACCOUNTS)
-    selected, available = _select_accounts(count)
+    """
+    Run the reaction + star-gifting pipeline for one due post.
 
-    if len(selected) < count:
+    Reactions: sent by EVERY saved account.
+    Stars: sent only by a randomly-selected subset (MIN_ACCOUNTS..MAX_ACCOUNTS)
+    that has balance >= MAX_STARS — unchanged from before.
+    """
+    all_accounts = load_accounts()
+    count = random.randint(MIN_ACCOUNTS, MAX_ACCOUNTS)
+    star_selected, available = _select_accounts(count)
+    star_phones = {acc.get("phone") for acc in star_selected}
+
+    if len(star_selected) < count:
         await notify_admin(
             client,
-            f"⚠️ پردازش پست {link} ممکن نشد — به <b>{count}</b> اکانت واجد نیاز بود، "
+            f"⚠️ ارسال ستاره برای پست {link} ممکن نشد — به <b>{count}</b> اکانت واجد نیاز بود، "
             f"اما فقط <b>{available}</b> اکانت موجودی ≥ <b>{MAX_STARS}</b> ستاره داشت.\n"
-            f"هیچ ستاره یا ری‌اکشنی ارسال نشد.",
+            f"ری‌اکشن‌ها طبق روال برای همه اکانت‌ها ارسال می‌شود.",
         )
-        return
 
     ok_actions = 0
     fail_actions = 0
     total_stars = 0
 
-    for account in selected:
+    for account in all_accounts:
         phone = account.get("phone", "نامشخص")
         name = esc(account.get("name", "نامشخص"))
         reaction = random.choice(REACTIONS)
-        stars = random.randint(MIN_STARS, MAX_STARS)
         lines: list[str] = []
 
         user_client = Client(
@@ -185,22 +193,24 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
                 f"دلیل: {_failure_reason(e)}\nپست: {link}"
             )
 
-        try:
-            await user_client.send_paid_reaction(
-                TARGET_CHANNEL, message_id=message.id, amount=stars
-            )
-            ok_actions += 1
-            total_stars += stars
-            lines.append(
-                f"✅ اکانت <code>{phone}</code> ({name}) — <b>{stars}</b> ستاره ارسال شد — "
-                f"پست: {link} — 🕒 {_now()}"
-            )
-        except Exception as e:
-            fail_actions += 1
-            lines.append(
-                f"❌ اکانت <code>{phone}</code> ({name}) — ارسال <b>{stars}</b> ستاره ناموفق — "
-                f"دلیل: {_failure_reason(e)}\nپست: {link}"
-            )
+        if phone in star_phones:
+            stars = random.randint(MIN_STARS, MAX_STARS)
+            try:
+                await user_client.send_paid_reaction(
+                    TARGET_CHANNEL, message_id=message.id, amount=stars
+                )
+                ok_actions += 1
+                total_stars += stars
+                lines.append(
+                    f"✅ اکانت <code>{phone}</code> ({name}) — <b>{stars}</b> ستاره ارسال شد — "
+                    f"پست: {link} — 🕒 {_now()}"
+                )
+            except Exception as e:
+                fail_actions += 1
+                lines.append(
+                    f"❌ اکانت <code>{phone}</code> ({name}) — ارسال <b>{stars}</b> ستاره ناموفق — "
+                    f"دلیل: {_failure_reason(e)}\nپست: {link}"
+                )
 
         await user_client.disconnect()
         await notify_admin(client, "\n".join(lines))
@@ -210,7 +220,8 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
         client,
         f"📊 <b>خلاصه پست</b>\n"
         f"🔗 پست: {link}\n"
-        f"👥 اکانت‌های انتخاب‌شده: <b>{count}</b>\n"
+        f"👥 اکانت‌های ری‌اکشن‌دهنده: <b>{len(all_accounts)}</b>\n"
+        f"⭐ اکانت‌های ستاره‌دهنده: <b>{len(star_selected)}</b>\n"
         f"✅ عملیات موفق: <b>{ok_actions}</b>\n"
         f"❌ عملیات ناموفق: <b>{fail_actions}</b>\n"
         f"⭐ مجموع ستاره ارسال‌شده: <b>{total_stars}</b>",

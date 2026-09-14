@@ -387,69 +387,55 @@ def register_backup(app: Client) -> None:
 ## File: handlers/channel_monitor.py
 ```python
 """
-channel_monitor.py — Interval-based reactions + Star gifting to channel posts.
+channel_monitor.py — Live channel-post detection + delayed reactions/Stars.
 
-The target channel may be private (numeric ID), where live on_message
-detection is unreliable — so detection is done by POLLING instead:
+How detection works:
+  The BOT ITSELF is added as an admin/member of the private target channel.
+  Telegram then pushes every new post to the bot live (no polling, no user
+  account needed just to "watch" the channel). We only reach for a user
+  account when it's time to actually react / send Stars, since bots cannot
+  send paid reactions.
 
-  Every POLL_INTERVAL_MINUTES, one of the stored user accounts (accounts
-  must be channel members anyway to react/paid-react there; get_chat_history
-  is a users-only MTProto method) fetches the last POLL_FETCH_COUNT posts:
+Pipeline per qualifying post:
+  1. Ad filter — skip immediately if AD_MARKERS appears in text/caption.
+  2. Dedupe — an album (media_group_id) fires one event per media item;
+     only the first is scheduled.
+  3. Wait DELAY_MINUTES (in the background, non-blocking).
+  4. Pick a random number of accounts (MIN_ACCOUNTS..MAX_ACCOUNTS) with
+     balance >= MAX_STARS.
+  5. Per account: connect via saved session, send a random reaction, then a
+     random Star amount (paid reaction). Errors are handled per account.
+  6. Log everything to all admins via bot/utils/notify.py.
 
-  1. Deduplicate: every keyword post gets one record in the processed-posts
-     store (bot/utils/post_store.py) — repeated cycles never re-process it.
-  2. Filter: the post must contain POST_KEYWORD in its text or caption.
-  3. Delay: act when the post is at least DELAY_MINUTES old (by post date).
-     A keyword post first seen older than POST_MAX_AGE_MINUTES is skipped
-     as stale (protects against acting on long-gone giveaways).
-  4. Pick a random number of accounts between MIN_ACCOUNTS and MAX_ACCOUNTS.
-  5. Validate: every selected account must have balance >= MAX_STARS.
-     Not enough eligible accounts → alert the admins, send nothing.
-  6. Assign a random reaction (from REACTIONS) to each account.
-  7. Assign a random Star amount (MIN_STARS..MAX_STARS) to each account.
-  8. Per account: connect via saved session, send the reaction, then the
-     Stars (paid reaction). Errors are handled per account.
-  9. Logging — every critical and half-critical event goes to ALL admins
-     via bot/utils/notify.py:
-       🚨 critical:  poll cycle crash, no readable poller account,
-                     post-processing crash
-       ⚠️ half-critical: per-account failures, not-enough-accounts alert
-       ℹ️ info:      per-account successes, per-post summary
+Note: because scheduling lives in memory, posts still "in the delay window"
+at the moment the bot restarts are lost — acceptable for this scale. If that
+ever matters, persist pending posts to disk and re-schedule them on startup.
 """
 
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from bot.config import (
+    AD_MARKERS,
     DELAY_MINUTES,
     MAX_ACCOUNTS,
     MAX_STARS,
     MIN_ACCOUNTS,
     MIN_STARS,
-    POLL_FETCH_COUNT,
-    POLL_INTERVAL_MINUTES,
-    POST_MAX_AGE_MINUTES,
-    POST_KEYWORD,
     REACTIONS,
     TARGET_CHANNEL,
 )
-from bot.utils import post_store
 from bot.utils.db import load_accounts
 from bot.utils.notify import notify_admin
 from bot.utils.ui import esc
 
-# Persistent poller: a user account that can read the target channel.
-# Kept connected across cycles; rotated to the next account on failure.
-_poller: Client | None = None
-
-# True while we are in the "no account can read the channel" state —
-# used to notify the admins once instead of spamming every cycle.
-_no_poller_notified: bool = False
+# In-memory dedupe of posts already scheduled/processed this run.
+_seen_keys: set[str] = set()
 
 # Small pause between accounts to reduce flood risk
 _PER_ACCOUNT_PAUSE_SECONDS = 1.5
@@ -463,66 +449,23 @@ def _post_link(message: Message) -> str:
     chat = message.chat
     if chat is not None and chat.username:
         return f"https://t.me/{chat.username}/{message.id}"
-    # Private superchannel: internal link format t.me/c/<raw_id>/<msg_id>
     if chat is not None and str(chat.id).startswith("-100"):
         return f"https://t.me/c/{str(chat.id)[4:]}/{message.id}"
     return f"پست #{message.id} در {TARGET_CHANNEL}"
 
 
-def _contains_keyword(message: Message) -> bool:
-    """True if POST_KEYWORD appears (case-insensitive) in the text or caption."""
-    keyword = POST_KEYWORD.lower()
-    text = message.text or ""
-    caption = message.caption or ""
-    return keyword in text.lower() or keyword in caption.lower()
+def _is_valid(message: Message) -> bool:
+    text = (message.text or "").lower()
+    caption = (message.caption or "").lower()
+    return any(
+        marker.lower() in text or marker.lower() in caption for marker in AD_MARKERS
+    )
 
 
 def _post_key(message: Message) -> str:
     """Stable dedupe key: albums share one media_group_id, count them once."""
     chat_id = message.chat.id if message.chat else 0
     return f"{chat_id}:{message.media_group_id or message.id}"
-
-
-def _decide_action(
-    entry: dict | None, message: Message, now: datetime
-) -> tuple[str, dict | None]:
-    """
-    Pure decision for one fetched post (no I/O — unit-testable).
-
-    Returns (action, record):
-      "act"   — run the pipeline now; `record` is set only for freshly
-                discovered posts (the caller must persist it as processing)
-      "wait"  — not yet due; `record` is set only for freshly discovered
-                posts (persisted as pending)
-      "skip"  — too old; `record` persisted as skipped
-    `entry` is the existing store record (or None if never seen). Callers
-    must pre-filter finished/processing entries before calling this.
-    """
-    post_date = message.date or now
-    if post_date.tzinfo is None:
-        post_date = post_date.replace(tzinfo=timezone.utc)
-
-    if entry is None:
-        # First time we see this keyword post
-        if now - post_date > timedelta(minutes=POST_MAX_AGE_MINUTES):
-            return "skip", {"status": "skipped", "reason": "too_old"}
-        act_at = post_date + timedelta(minutes=DELAY_MINUTES)
-        record = {
-            "status": "pending",
-            "post_date": post_date.isoformat(),
-            "act_at": act_at.isoformat(),
-        }
-        if act_at <= now:
-            record["status"] = "processing"
-            return "act", record
-        return "wait", record
-
-    # Already pending: act once act_at has passed
-    if entry.get("status") == "pending":
-        act_at = datetime.fromisoformat(entry["act_at"])
-        if act_at <= now:
-            return "act", None
-    return "wait", None
 
 
 def _select_accounts(count: int) -> tuple[list[dict], int]:
@@ -568,59 +511,6 @@ def _failure_reason(e: Exception) -> str:
     return f"{type(e).__name__}: {esc(e)}"
 
 
-# ── Poller account management ─────────────────────────────────────────────────
-
-
-async def _acquire_poller(client: Client) -> Client | None:
-    """
-    Reuse the persistent poller, or connect a user account that can read
-    the target channel. Tries accounts in stored order; keeps the working
-    one connected across cycles and rotates to the next on failure.
-    """
-    global _poller, _no_poller_notified
-
-    if _poller is not None:
-        return _poller
-    n = 0
-    for account in load_accounts():
-        if n == 1:
-            return
-
-        session_string = account.get("session_string")
-        if not session_string:
-            continue
-
-        candidate = Client("poller", session_string=session_string, in_memory=True)
-        try:
-            await candidate.connect()
-            # Verify the account can actually read the channel history
-            async for _ in candidate.get_chat_history(TARGET_CHANNEL, limit=1):
-                break
-            _poller = candidate
-            logging.info("Poller account: %s", account.get("phone", "?"))
-            if _no_poller_notified:
-                # We were down before — tell the admins we recovered
-                await notify_admin(
-                    client,
-                    "✅ <b>بررسی کانال دوباره وصل شد</b> — اکانت خواندن: "
-                    f"<code>{esc(account.get('phone', '?'))}</code>",
-                )
-                _no_poller_notified = False
-            n = 1
-            return _poller
-
-        except Exception as e:
-            logging.warning(
-                "Poller account %s unusable: %s", account.get("phone", "?"), e
-            )
-            try:
-                await candidate.disconnect()
-            except Exception:
-                pass
-
-    return None
-
-
 # ── Per-post pipeline ─────────────────────────────────────────────────────────
 
 
@@ -630,9 +520,6 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
     selected, available = _select_accounts(count)
 
     if len(selected) < count:
-        await post_store.mark(
-            _post_key(message), "skipped", reason="not_enough_eligible"
-        )
         await notify_admin(
             client,
             f"⚠️ پردازش پست {link} ممکن نشد — به <b>{count}</b> اکانت واجد نیاز بود، "
@@ -641,9 +528,9 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
         )
         return
 
-    ok_actions = 0  # successful reactions + star sends
-    fail_actions = 0  # failed reactions + star sends
-    total_stars = 0  # stars actually delivered
+    ok_actions = 0
+    fail_actions = 0
+    total_stars = 0
 
     for account in selected:
         phone = account.get("phone", "نامشخص")
@@ -670,7 +557,6 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
             )
             continue
 
-        # Reaction first…
         try:
             await user_client.send_reaction(
                 TARGET_CHANNEL, message_id=message.id, emoji=reaction
@@ -687,7 +573,6 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
                 f"دلیل: {_failure_reason(e)}\nپست: {link}"
             )
 
-        # …then the Stars (paid reaction)
         try:
             await user_client.send_paid_reaction(
                 TARGET_CHANNEL, message_id=message.id, amount=stars
@@ -706,12 +591,9 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
             )
 
         await user_client.disconnect()
-
-        # Detailed per-account log to all admins
         await notify_admin(client, "\n".join(lines))
         await asyncio.sleep(_PER_ACCOUNT_PAUSE_SECONDS)
 
-    # Per-post summary
     await notify_admin(
         client,
         f"📊 <b>خلاصه پست</b>\n"
@@ -723,61 +605,13 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
     )
 
 
-async def _handle_fetched_post(client: Client, message: Message, now: datetime) -> None:
-    """Store/decision step for one fetched post (dedupe + filter + delay)."""
-    key = _post_key(message)
-
-    # Cheap keyword check runs before any store access — non-matching posts
-    # are intentionally not stored (re-checking them each cycle is free).
-    if not _contains_keyword(message):
-        return
-
-    entry = await post_store.get_post(key)
-    if entry is not None and entry.get("status") in (
-        "processing",
-        "done",
-        "failed",
-        "skipped",
-    ):
-        return  # already handled — the dedupe store's whole purpose
-
-    action, record = _decide_action(entry, message, now)
-
-    if action == "skip":
-        await post_store.ensure(key, message.date, now, status=record["status"])
-        await post_store.mark(key, "skipped", reason=record.get("reason"))
-        logging.info("Post %s skipped: %s", message.id, record.get("reason"))
-        return
-
-    if action == "wait":
-        if record is not None:
-            await post_store.ensure(
-                key,
-                message.date,
-                datetime.fromisoformat(record["act_at"]),
-            )
-        return  # not due yet — next cycle will pick it up
-
-    # action == "act"
-    if entry is None:
-        await post_store.ensure(
-            key,
-            message.date,
-            datetime.fromisoformat(record["act_at"]),
-            status="processing",
-        )
-    else:
-        await post_store.mark(key, "processing")
-
-    link = _post_link(message)
-    logging.info("Post %s is due — processing (key=%s)", message.id, key)
+async def _delayed_process(client: Client, message: Message, link: str) -> None:
+    """Wait DELAY_MINUTES, then run the pipeline. Scheduled as a background task."""
     try:
+        await asyncio.sleep(DELAY_MINUTES * 60)
         await _process_post(client, message, link)
-        await post_store.mark(key, "done", link=link)
     except Exception as e:
         logging.exception("Post processing crashed")
-        await post_store.mark(key, "failed", error=str(e))
-        # 🚨 critical — the admins must know a giveaway was not completed
         await notify_admin(
             client,
             f"🚨 <b>پردازش پست با خطا متوقف شد</b>\n"
@@ -786,80 +620,35 @@ async def _handle_fetched_post(client: Client, message: Message, now: datetime) 
         )
 
 
-# ── Poll cycle + loop ─────────────────────────────────────────────────────────
-
-
-async def poll_once(client: Client) -> int:
-    """Run one poll cycle. Returns the number of keyword posts found."""
-    global _poller, _no_poller_notified
-
-    poller = await _acquire_poller(client)
-    if poller is None:
-        if not _no_poller_notified:
-            # 🚨 critical — nothing can be processed at all
-            await notify_admin(
-                client,
-                "🚨 <b>هیچ اکانتی نمی‌تواند کانال را بخواند!</b>\n"
-                "هیچ اکانتی در دیتابیس سشن معتبری برای خواندن "
-                f"<code>{esc(str(TARGET_CHANNEL))}</code> ندارد.\n"
-                "بررسی: اکانت‌ها باید عضو کانال باشند و سشن‌ها معتبر باشند.",
-            )
-            _no_poller_notified = True
-        return 0
-
-    messages: list[Message] = []
-    try:
-        async for m in poller.get_chat_history(TARGET_CHANNEL, limit=POLL_FETCH_COUNT):
-            if m.service:
-                continue
-            messages.append(m)
-    except Exception:
-        # Poller died — drop it so the next cycle rotates to another account
-        try:
-            await poller.disconnect()
-        except Exception:
-            pass
-        _poller = None
-        raise
-
-    now = datetime.now(timezone.utc)
-    found = 0
-    for message in messages:
-        if _contains_keyword(message):
-            found += 1
-        await _handle_fetched_post(client, message, now)
-    return found
-
-
-async def poll_loop(client: Client) -> None:
-    """Forever: poll → process → sleep POLL_INTERVAL_MINUTES."""
-    logging.info(
-        "Channel poller started — every %s min, last %s posts of %s",
-        POLL_INTERVAL_MINUTES,
-        POLL_FETCH_COUNT,
-        TARGET_CHANNEL,
-    )
-    while True:
-        try:
-            await poll_once(client)
-        except Exception as e:
-            # 🚨 critical — a whole cycle failed
-            logging.exception("Poll cycle failed")
-            await notify_admin(
-                client,
-                f"🚨 <b>خطا در چرخه بررسی کانال</b>\n"
-                f"❌ خطا: <code>{esc(e)}</code>\n"
-                f"🕒 {_now()}",
-            )
-        await asyncio.sleep(POLL_INTERVAL_MINUTES * 60)
+# ── Live handler ───────────────────────────────────────────────────────────────
 
 
 def register_channel_monitor(app: Client) -> None:
-    """Spawn the polling loop when the client starts."""
+    """Register the live channel-post listener (bot must be admin/member there)."""
 
-    @app.on_start()
-    async def _spawn_poller(client: Client) -> None:
-        asyncio.create_task(poll_loop(client))
+    @app.on_message(filters.chat(TARGET_CHANNEL))
+    async def on_channel_post(client: Client, message: Message) -> None:
+        logging.info("new post detected in channel")
+        if message.service:
+            return
+
+        key = _post_key(message)
+        if key in _seen_keys:
+            return  # album duplicate
+
+        if _is_valid(message) == False:
+            logging.info("Post %s skipped: matches an ad marker", message.id)
+            return
+
+        _seen_keys.add(key)
+        link = _post_link(message)
+        logging.info(
+            "New post %s detected — scheduled in %s min (key=%s)",
+            message.id,
+            DELAY_MINUTES,
+            key,
+        )
+        asyncio.create_task(_delayed_process(client, message, link))
 ```
 
 ## File: handlers/delete_account.py
@@ -1396,7 +1185,7 @@ async def notify_admin(client: Client, text: str) -> None:
     delivered = 0
     for admin_id in ADMIN_IDS:
         try:
-            await client.send_message(admin_id, text, parse_mode="html")
+            await client.send_message(admin_id, text)
             delivered += 1
         except Exception as e:
             # Keep a local trace so the event is never fully lost
@@ -1647,8 +1436,14 @@ def _parse_channel(raw_value: str) -> int | str:
 # Channel to monitor (bot must be an admin there)
 TARGET_CHANNEL: int | str = _parse_channel(os.getenv("TARGET_CHANNEL", "@mychannel"))
 
-# Keyword that must appear in a post's text or caption for it to be processed
-POST_KEYWORD: str = os.getenv("POST_KEYWORD", "giveaway")
+# Posts are processed by default. Any post whose text/caption contains one of
+# these (comma-separated, case-insensitive) markers is treated as an
+# advertisement and skipped entirely — no reaction, no stars.
+AD_MARKERS: list[str] = [
+    m.strip()
+    for m in os.getenv("POST_KEYWORD", "#ad,#sponsored,تبلیغ").split(",")
+    if m.strip()
+]
 
 # Minutes to wait after detecting a qualifying post before acting
 DELAY_MINUTES: int = int(os.getenv("DELAY_MINUTES", "13"))
@@ -1666,20 +1461,4 @@ MAX_STARS: int = int(os.getenv("MAX_STARS", "5"))
 REACTIONS: list[str] = [
     r.strip() for r in os.getenv("REACTIONS", "❤️,👍,🔥,🎉").split(",") if r.strip()
 ]
-
-# ── Channel polling (replaces live on_message detection) ─────────────────────
-
-# Minutes between poll cycles: each cycle fetches the latest posts of the
-# target channel and decides which ones must be processed.
-POLL_INTERVAL_MINUTES: int = int(os.getenv("POLL_INTERVAL_MINUTES", "5"))
-
-# How many latest posts each poll cycle fetches.
-POLL_FETCH_COUNT: int = int(os.getenv("POLL_FETCH_COUNT", "10"))
-
-# A keyword post first seen older than this is skipped as stale (protection
-# against acting on long-gone giveaways, e.g. right after a bot restart).
-POST_MAX_AGE_MINUTES: int = int(os.getenv("POST_MAX_AGE_MINUTES", "60"))
-
-# JSON store of already-checked posts (prevents re-processing on every cycle)
-POSTS_DB_PATH: str = os.getenv("POSTS_DB_PATH", "data/processed_posts.json")
 ```
