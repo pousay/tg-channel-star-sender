@@ -36,6 +36,7 @@ SESSIONS_DIR: str = os.getenv("SESSIONS_DIR", "sessions")
 
 # ── Channel auto-reactions + Star gifting ─────────────────────────────────────
 
+
 def _parse_channel(raw_value: str) -> int | str:
     """Accept numeric channel IDs (-100...) as int, usernames as str."""
     raw_value = raw_value.strip()
@@ -47,8 +48,14 @@ def _parse_channel(raw_value: str) -> int | str:
 # Channel to monitor (bot must be an admin there)
 TARGET_CHANNEL: int | str = _parse_channel(os.getenv("TARGET_CHANNEL", "@mychannel"))
 
-# Keyword that must appear in a post's text or caption for it to be processed
-POST_KEYWORD: str = os.getenv("POST_KEYWORD", "giveaway")
+# Posts are processed by default. Any post whose text/caption contains one of
+# these (comma-separated, case-insensitive) markers is treated as an
+# advertisement and skipped entirely — no reaction, no stars.
+AD_MARKERS: list[str] = [
+    m.strip()
+    for m in os.getenv("POST_KEYWORD", "#ad,#sponsored,تبلیغ").split(",")
+    if m.strip()
+]
 
 # Minutes to wait after detecting a qualifying post before acting
 DELAY_MINUTES: int = int(os.getenv("DELAY_MINUTES", "13"))
@@ -66,19 +73,3 @@ MAX_STARS: int = int(os.getenv("MAX_STARS", "5"))
 REACTIONS: list[str] = [
     r.strip() for r in os.getenv("REACTIONS", "❤️,👍,🔥,🎉").split(",") if r.strip()
 ]
-
-# ── Channel polling (replaces live on_message detection) ─────────────────────
-
-# Minutes between poll cycles: each cycle fetches the latest posts of the
-# target channel and decides which ones must be processed.
-POLL_INTERVAL_MINUTES: int = int(os.getenv("POLL_INTERVAL_MINUTES", "5"))
-
-# How many latest posts each poll cycle fetches.
-POLL_FETCH_COUNT: int = int(os.getenv("POLL_FETCH_COUNT", "10"))
-
-# A keyword post first seen older than this is skipped as stale (protection
-# against acting on long-gone giveaways, e.g. right after a bot restart).
-POST_MAX_AGE_MINUTES: int = int(os.getenv("POST_MAX_AGE_MINUTES", "60"))
-
-# JSON store of already-checked posts (prevents re-processing on every cycle)
-POSTS_DB_PATH: str = os.getenv("POSTS_DB_PATH", "data/processed_posts.json")
