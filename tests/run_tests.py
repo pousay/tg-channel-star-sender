@@ -16,6 +16,12 @@ os.environ["API_HASH"] = "x"
 os.environ["ADMIN_IDS"] = "111,222"
 os.environ.setdefault("TARGET_CHANNEL", "@testch")
 
+# Isolated store file for the post-store tests (deleted/reset by each test)
+import tempfile
+
+_POSTS_DB = os.path.join(tempfile.mkdtemp(prefix="ss-tests-"), "processed_posts.json")
+os.environ["POSTS_DB_PATH"] = _POSTS_DB
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _PASSED: list[str] = []
@@ -336,6 +342,131 @@ def test_active_add_router_consumes_update() -> None:
         raise AssertionError("active router must consume, not propagate")
 
 
+# ── Processed-posts store ─────────────────────────────────────────────────────
+
+def _reset_posts_db() -> None:
+    """Start every store test from a clean file."""
+    if os.path.exists(_POSTS_DB):
+        os.remove(_POSTS_DB)
+
+
+def test_post_store_crud_and_persistence() -> None:
+    """ensure is idempotent, mark transitions, records persist across loads."""
+    from datetime import datetime, timedelta, timezone
+
+    from bot.utils import post_store as ps
+
+    _reset_posts_db()
+    now = datetime.now(timezone.utc)
+
+    async def body() -> None:
+        entry = await ps.ensure("c:1", now, now + timedelta(minutes=13))
+        assert entry["status"] == "pending"
+        assert "first_seen" in entry
+
+        # Idempotent: a second ensure must not overwrite
+        again = await ps.ensure("c:1", now, now)
+        assert again["act_at"] == entry["act_at"]
+
+        await ps.mark("c:1", "done", summary={"ok": 4})
+        got = await ps.get_post("c:1")
+        assert got["status"] == "done"
+        assert got["summary"]["ok"] == 4
+        assert "finished_at" in got
+
+        # A second process (fresh loads) sees the same record
+        assert (await ps.get_post("c:1"))["status"] == "done"
+
+        # get_post on unknown key
+        assert await ps.get_post("c:none") is None
+
+    asyncio.run(body())
+    _reset_posts_db()
+
+
+def test_post_store_prunes_old_finished_records() -> None:
+    """Finished records older than RETENTION_DAYS are dropped on any write."""
+    from datetime import datetime, timedelta, timezone
+
+    from bot.utils import post_store as ps
+
+    _reset_posts_db()
+    now = datetime.now(timezone.utc)
+
+    # Seed an 8-day-old finished record directly
+    ps._save({"c:old": {
+        "status": "done",
+        "finished_at": (now - timedelta(days=8)).isoformat(),
+    }})
+
+    async def body() -> None:
+        await ps.mark("c:new", "skipped", reason="too_old")  # triggers prune
+        assert await ps.get_post("c:old") is None, "stale record must be pruned"
+        assert (await ps.get_post("c:new")) is not None
+
+    asyncio.run(body())
+    _reset_posts_db()
+
+
+# ── Poll decision logic ───────────────────────────────────────────────────────
+
+def test_monitor_decide_actions() -> None:
+    """Fresh→wait, mature→act, stale→skip, pending due→act, pending young→wait."""
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace as NS
+
+    from bot.handlers import channel_monitor as cm
+
+    now = datetime.now(timezone.utc)
+
+    def msg(age_minutes: float) -> NS:
+        return NS(id=42, date=now - timedelta(minutes=age_minutes), chat=NS(id=-100123))
+
+    # a) Fresh post, never seen → wait, recorded as pending
+    action, record = cm._decide_action(None, msg(2), now)
+    assert action == "wait" and record["status"] == "pending"
+    act_at = datetime.fromisoformat(record["act_at"])
+    assert abs((act_at - now).total_seconds() - (13 - 2) * 60) < 1  # delay from post date
+
+    # b) Mature post (past delay), never seen → act now, recorded as processing
+    action, record = cm._decide_action(None, msg(20), now)
+    assert action == "act" and record["status"] == "processing"
+
+    # c) Stale post (older than max age), never seen → skip
+    action, record = cm._decide_action(None, msg(cm.POST_MAX_AGE_MINUTES + 120), now)
+    assert action == "skip" and record["reason"] == "too_old"
+
+    # d) Pending entry whose act_at passed → act
+    entry = {
+        "status": "pending",
+        "act_at": (now - timedelta(minutes=1)).isoformat(),
+    }
+    action, record = cm._decide_action(entry, msg(20), now)
+    assert action == "act" and record is None
+
+    # e) Pending entry, act_at in the future → wait
+    entry = {
+        "status": "pending",
+        "act_at": (now + timedelta(minutes=5)).isoformat(),
+    }
+    action, record = cm._decide_action(entry, msg(2), now)
+    assert action == "wait" and record is None
+
+
+def test_monitor_private_channel_link() -> None:
+    """Private superchannel posts get t.me/c/<internal>/<msg> links."""
+    from types import SimpleNamespace as NS
+
+    from bot.handlers import channel_monitor as cm
+
+    m = NS(id=77, chat=NS(id=-1001234567890, username=None))
+    assert cm._post_link(m) == "https://t.me/c/1234567890/77"
+
+    # Public channel keeps the username link
+    m2 = NS(id=5, chat=NS(id=-1001234567890, username="pubch"))
+    assert cm._post_link(m2) == "https://t.me/pubch/5"
+
+
 def main() -> None:
     print("Running tests:")
     run_test(test_config_admin_ids_parsing)
@@ -350,6 +481,10 @@ def main() -> None:
     run_test(test_idle_text_routers_continue_propagation)
     run_test(test_delete_flow_receives_phone_through_router_chain)
     run_test(test_active_add_router_consumes_update)
+    run_test(test_post_store_crud_and_persistence)
+    run_test(test_post_store_prunes_old_finished_records)
+    run_test(test_monitor_decide_actions)
+    run_test(test_monitor_private_channel_link)
 
     print(f"\n{len(_PASSED)} passed, {len(_FAILED)} failed")
     if _FAILED:
