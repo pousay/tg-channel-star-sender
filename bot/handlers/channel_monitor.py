@@ -8,18 +8,17 @@ How detection works:
   account when it's time to actually react / send Stars, since bots cannot
   send paid reactions.
 
-Pipeline per qualifying post:
-  1. Ad filter — skip immediately if AD_MARKERS appears in text/caption.
-  2. Dedupe — an album (media_group_id) fires one event per media item;
+Pipeline per post:
+  1. Dedupe — an album (media_group_id) fires one event per media item;
      only the first is scheduled.
-  3. Wait DELAY_MINUTES (in the background, non-blocking).
-  4. Pick a random subset of accounts (MIN_ACCOUNTS..MAX_ACCOUNTS) with
+  2. Wait DELAY_MINUTES (in the background, non-blocking).
+  3. Pick a random subset of accounts (MIN_ACCOUNTS..MAX_ACCOUNTS) with
      balance >= MAX_STARS — this subset is who will send Stars.
-  5. Per account (ALL saved accounts, not just the subset): connect via saved
-     session, send a random reaction. If the account is in the Star subset,
-     also send a random Star amount (paid reaction). Errors are handled
-     per account.
-  6. Log everything to all admins via bot/utils/notify.py.
+  4. Every saved account sends a reaction; results are batched into ONE
+     admin message (post link once at the top, then one line per account).
+     Accounts in the Star subset also send a random Star amount (paid
+     reaction) — those results are logged per account, as before.
+  5. Log a summary to all admins via bot/utils/notify.py.
 
 Note: because scheduling lives in memory, posts still "in the delay window"
 at the moment the bot restarts are lost — acceptable for this scale. If that
@@ -35,7 +34,6 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from bot.config import (
-    AD_MARKERS,
     DELAY_MINUTES,
     MAX_ACCOUNTS,
     MAX_STARS,
@@ -66,14 +64,6 @@ def _post_link(message: Message) -> str:
     if chat is not None and str(chat.id).startswith("-100"):
         return f"https://t.me/c/{str(chat.id)[4:]}/{message.id}"
     return f"پست #{message.id} در {TARGET_CHANNEL}"
-
-
-def _is_valid(message: Message) -> bool:
-    text = (message.text or "").lower()
-    caption = (message.caption or "").lower()
-    return any(
-        marker.lower() in text or marker.lower() in caption for marker in AD_MARKERS
-    )
 
 
 def _post_key(message: Message) -> str:
@@ -132,7 +122,7 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
     """
     Run the reaction + star-gifting pipeline for one due post.
 
-    Reactions: sent by EVERY saved account.
+    Reactions: sent by EVERY saved account; results batched into one message.
     Stars: sent only by a randomly-selected subset (MIN_ACCOUNTS..MAX_ACCOUNTS)
     that has balance >= MAX_STARS — unchanged from before.
     """
@@ -152,12 +142,12 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
     ok_actions = 0
     fail_actions = 0
     total_stars = 0
+    reaction_lines: list[str] = []
 
     for account in all_accounts:
         phone = account.get("phone", "نامشخص")
         name = esc(account.get("name", "نامشخص"))
         reaction = random.choice(REACTIONS)
-        lines: list[str] = []
 
         user_client = Client(
             "actor",
@@ -169,11 +159,9 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
             await user_client.connect()
         except Exception as e:
             fail_actions += 1
-            await notify_admin(
-                client,
+            reaction_lines.append(
                 f"❌ اکانت <code>{phone}</code> ({name}) — اتصال با سشن ناموفق بود — "
-                f"دلیل: {_failure_reason(e)}\n"
-                f"پست: {link}",
+                f"دلیل: {_failure_reason(e)}"
             )
             continue
 
@@ -182,15 +170,14 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
                 TARGET_CHANNEL, message_id=message.id, emoji=reaction
             )
             ok_actions += 1
-            lines.append(
-                f"✅ اکانت <code>{phone}</code> ({name}) — ری‌اکشن {reaction} ارسال شد — "
-                f"پست: {link} — 🕒 {_now()}"
+            reaction_lines.append(
+                f"✅ اکانت <code>{phone}</code> ({name}) — ری‌اکشن {reaction} ارسال شد"
             )
         except Exception as e:
             fail_actions += 1
-            lines.append(
+            reaction_lines.append(
                 f"❌ اکانت <code>{phone}</code> ({name}) — ارسال ری‌اکشن {reaction} ناموفق — "
-                f"دلیل: {_failure_reason(e)}\nپست: {link}"
+                f"دلیل: {_failure_reason(e)}"
             )
 
         if phone in star_phones:
@@ -201,20 +188,26 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
                 )
                 ok_actions += 1
                 total_stars += stars
-                lines.append(
+                await notify_admin(
+                    client,
                     f"✅ اکانت <code>{phone}</code> ({name}) — <b>{stars}</b> ستاره ارسال شد — "
-                    f"پست: {link} — 🕒 {_now()}"
+                    f"پست: {link} — 🕒 {_now()}",
                 )
             except Exception as e:
                 fail_actions += 1
-                lines.append(
+                await notify_admin(
+                    client,
                     f"❌ اکانت <code>{phone}</code> ({name}) — ارسال <b>{stars}</b> ستاره ناموفق — "
-                    f"دلیل: {_failure_reason(e)}\nپست: {link}"
+                    f"دلیل: {_failure_reason(e)}\nپست: {link}",
                 )
 
         await user_client.disconnect()
-        await notify_admin(client, "\n".join(lines))
         await asyncio.sleep(_PER_ACCOUNT_PAUSE_SECONDS)
+
+    await notify_admin(
+        client,
+        f"🔗 پست: {link}\n🕒 {_now()}\n\n" + "\n".join(reaction_lines),
+    )
 
     await notify_admin(
         client,
@@ -258,10 +251,6 @@ def register_channel_monitor(app: Client) -> None:
         key = _post_key(message)
         if key in _seen_keys:
             return  # album duplicate
-
-        if _is_valid(message) == False:
-            logging.info("Post %s skipped: matches an ad marker", message.id)
-            return
 
         _seen_keys.add(key)
         link = _post_link(message)
