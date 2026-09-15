@@ -13,11 +13,13 @@ Pipeline per post:
      only the first is scheduled.
   2. Wait DELAY_MINUTES (in the background, non-blocking).
   3. Pick a random subset of accounts (MIN_ACCOUNTS..MAX_ACCOUNTS) with
-     balance >= MAX_STARS — this subset is who will send Stars.
-  4. Every saved account sends a reaction; results are batched into ONE
+     balance >= MAX_STARS — this subset is eligible to send Stars.
+  4. Every saved account sends a normal reaction (e.g. heart) — this always
+     happens, for every post, no filtering. Results are batched into ONE
      admin message (post link once at the top, then one line per account).
-     Accounts in the Star subset also send a random Star amount (paid
-     reaction) — those results are logged per account, as before.
+     Accounts in the Star subset ALSO send a random Star amount, but only if
+     the post passes _is_valid(message) — ad posts (AD_MARKERS match) get
+     reactions but never Stars. Star results are logged per account.
   5. Log a summary to all admins via bot/utils/notify.py.
 
 Note: because scheduling lives in memory, posts still "in the delay window"
@@ -34,6 +36,7 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from bot.config import (
+    AD_MARKERS,
     DELAY_MINUTES,
     MAX_ACCOUNTS,
     MAX_STARS,
@@ -64,6 +67,14 @@ def _post_link(message: Message) -> str:
     if chat is not None and str(chat.id).startswith("-100"):
         return f"https://t.me/c/{str(chat.id)[4:]}/{message.id}"
     return f"پست #{message.id} در {TARGET_CHANNEL}"
+
+
+def _is_valid(message: Message) -> bool:
+    text = (message.text or "").lower()
+    caption = (message.caption or "").lower()
+    return any(
+        marker.lower() in text or marker.lower() in caption for marker in AD_MARKERS
+    )
 
 
 def _post_key(message: Message) -> str:
@@ -180,7 +191,7 @@ async def _process_post(client: Client, message: Message, link: str) -> None:
                 f"دلیل: {_failure_reason(e)}"
             )
 
-        if phone in star_phones:
+        if phone in star_phones and _is_valid(message):
             stars = random.randint(MIN_STARS, MAX_STARS)
             try:
                 await user_client.send_paid_reaction(
